@@ -139,6 +139,28 @@ DEFAULT_TARGET_DATE = "2026-07-25"
 
 Then just run: `python bms_checker.py`
 
+### Checking Multiple Movies
+You can check multiple movies, theatres, or dates simultaneously by creating a `targets.json` file in the same folder:
+
+```json
+[
+  {
+    "url": "https://in.bookmyshow.com/buytickets/movie1...",
+    "theatre": "PVR",
+    "date": "2026-07-25"
+  },
+  {
+    "url": "https://in.bookmyshow.com/buytickets/movie2...",
+    "theatre": "INOX",
+    "date": "2026-07-26"
+  }
+]
+```
+Then run the script pointing to this file:
+```bash
+python bms_checker.py --targets targets.json
+```
+
 ---
 
 ## Step 5: Set Up Cron (Automated Hourly Checks)
@@ -216,7 +238,10 @@ git push -u origin main
 
 The workflow will now automatically run **every hour** on GitHub's servers. ✅
 
-> **💡 To change the movie/theatre/date later**, just update the repository variables in GitHub Settings — no code changes needed.
+> **💡 Checking Multiple Movies on GitHub**: 
+> If you want to check multiple movies, create a `targets.json` file in your repository (see format above) and commit it. The GitHub Action will automatically detect it and check all movies in the file, ignoring the single-movie variables.
+
+> **💡 To change the single movie/theatre/date later**, just update the repository variables in GitHub Settings.
 
 > **💡 To stop the checker**, go to Actions → BMS Ticket Checker → click the `⋯` menu → Disable workflow.
 

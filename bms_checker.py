@@ -503,6 +503,8 @@ Examples:
                        help="Theatre name to match (partial, case-insensitive)")
     parser.add_argument("--date", default=DEFAULT_TARGET_DATE,
                        help="Target date in YYYY-MM-DD format")
+    parser.add_argument("--targets",
+                       help="Path to a JSON file containing an array of targets to check (overrides individual flags)")
     parser.add_argument("--mark-done", action="store_true",
                        help="Mark current check as done (stop re-alerting)")
     parser.add_argument("--reset", action="store_true",
@@ -528,134 +530,160 @@ Examples:
         return
     
     # Validate required config
-    movie_url = args.movie_url
-    theatre_name = args.theatre
-    target_date = args.date
+    targets = []
     
-    if not movie_url:
-        print("ERROR: --movie-url is required (or set DEFAULT_MOVIE_URL in the script)")
-        sys.exit(1)
-    if not theatre_name:
-        print("ERROR: --theatre is required (or set DEFAULT_THEATRE_NAME in the script)")
-        sys.exit(1)
-    if not target_date:
-        print("ERROR: --date is required (or set DEFAULT_TARGET_DATE in the script)")
-        sys.exit(1)
+    if args.targets:
+        targets_file = Path(args.targets)
+        if targets_file.exists():
+            try:
+                with open(targets_file, "r") as f:
+                    targets = json.load(f)
+            except Exception as e:
+                print(f"ERROR: Failed to parse targets file {args.targets}: {e}")
+                sys.exit(1)
+        else:
+            print(f"ERROR: Targets file {args.targets} does not exist.")
+            sys.exit(1)
+    else:
+        movie_url = args.movie_url
+        theatre_name = args.theatre
+        target_date = args.date
+        
+        if not movie_url:
+            print("ERROR: --movie-url is required (or set DEFAULT_MOVIE_URL) if --targets is not used")
+            sys.exit(1)
+        if not theatre_name:
+            print("ERROR: --theatre is required (or set DEFAULT_THEATRE_NAME) if --targets is not used")
+            sys.exit(1)
+        if not target_date:
+            print("ERROR: --date is required (or set DEFAULT_TARGET_DATE) if --targets is not used")
+            sys.exit(1)
+            
+        targets = [{
+            "movie_url": movie_url,
+            "theatre": theatre_name,
+            "date": target_date
+        }]
     
-    # Validate date format
-    try:
-        datetime.strptime(target_date, "%Y-%m-%d")
-    except ValueError:
-        print(f"ERROR: Invalid date format '{target_date}'. Use YYYY-MM-DD.")
-        sys.exit(1)
+    # Validate date format for all targets
+    for t in targets:
+        try:
+            datetime.strptime(t["date"], "%Y-%m-%d")
+        except ValueError:
+            print(f"ERROR: Invalid date format '{t['date']}' in target. Use YYYY-MM-DD.")
+            sys.exit(1)
     
     # Load Telegram config
     tg_token, tg_chat_id = get_telegram_config()
     
-    # State key for this specific check
-    state_key = f"{theatre_name.lower()}_{target_date}"
-    
     print("=" * 60)
     print(f"🎬 BookMyShow Checker — {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}")
+    print(f"🎯 Checking {len(targets)} target(s)...")
     print("=" * 60)
     
     state = load_state()
     
-    try:
-        result = check_bms(movie_url, theatre_name, target_date)
-    except Exception as e:
-        # Page check failed — send error alert so user doesn't miss a silent failure
-        error_msg = (
-            f"⚠️ <b>BMS Checker Script FAILED</b> ⚠️\n\n"
-            f"Error: <code>{str(e)[:200]}</code>\n\n"
-            f"🎬 Movie URL: {movie_url}\n"
-            f"🏢 Theatre: {theatre_name}\n"
-            f"📅 Date: {target_date}\n\n"
-            f"⏰ Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}\n\n"
-            f"👉 <b>Check manually — the script might be broken or BMS changed their page structure.</b>"
-        )
-        send_telegram(tg_token, tg_chat_id, error_msg)
-        print(f"\n❌ Script failed. Error alert sent via Telegram.")
-        sys.exit(1)
+    for i, target in enumerate(targets):
+        movie_url = target.get("movie_url") or target.get("url")
+        theatre_name = target["theatre"]
+        target_date = target["date"]
+        
+        state_key = f"{theatre_name.lower()}_{target_date}"
+        print(f"\n▶️  Target {i+1}/{len(targets)}: {theatre_name} on {target_date}")
+        
+        try:
+            result = check_bms(movie_url, theatre_name, target_date)
+        except Exception as e:
+            # Page check failed — send error alert so user doesn't miss a silent failure
+            error_msg = (
+                f"⚠️ <b>BMS Checker Script FAILED</b> ⚠️\n\n"
+                f"Error: <code>{str(e)[:200]}</code>\n\n"
+                f"🎬 Movie URL: {movie_url}\n"
+                f"🏢 Theatre: {theatre_name}\n"
+                f"📅 Date: {target_date}\n\n"
+                f"⏰ Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}\n\n"
+                f"👉 <b>Check manually — the script might be broken or BMS changed their page structure.</b>"
+            )
+            send_telegram(tg_token, tg_chat_id, error_msg)
+            print(f"❌ Script failed for this target. Error alert sent via Telegram.")
+            continue
+        
+        print("-" * 40)
+        print("📊 RESULTS")
+        print(f"   Date available:  {result['date_available']}")
+        print(f"   Theatre found:   {result['theatre_found']}")
+        print(f"   Details:         {result['theatre_details']}")
+        print(f"   Movie:           {result['movie_name']}")
+        if result['showtimes']:
+            print(f"   Showtimes:       {', '.join(result['showtimes'])}")
+        
+        # Determine if we should alert
+        trigger = result["date_available"] and result["theatre_found"]
+        
+        if trigger and should_alert(state, state_key):
+            # 🎉 BOOKING IS OPEN — Send alert!
+            showtime_str = ", ".join(result["showtimes"]) if result["showtimes"] else "check page for times"
+            
+            message = (
+                f"🎟️🎟️🎟️ <b>TICKETS ARE OPEN!</b> 🎟️🎟️🎟️\n\n"
+                f"🎬 <b>{result['movie_name']}</b>\n"
+                f"🏢 <b>{theatre_name}</b>\n"
+                f"📅 <b>{target_date}</b>\n"
+                f"🕐 Showtimes: {showtime_str}\n\n"
+                f"🔗 <a href=\"{result['target_url']}\">BOOK NOW on BookMyShow</a>\n\n"
+                f"⚡ <b>GO GO GO — Book before it sells out!</b>\n\n"
+                f"<i>Run <code>python bms_checker.py --mark-done</code> after booking to stop reminders.</i>"
+            )
+            send_telegram(tg_token, tg_chat_id, message)
+            
+            # Update state
+            state[state_key] = {
+                "theatre_found": True,
+                "date_available": True,
+                "last_alert_timestamp": time.time(),
+                "last_alert_time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+                "done": False,
+                "details": result["theatre_details"],
+            }
+            print("🎉 ALERT SENT! Booking is open!")
+            
+        elif trigger:
+            # Theatre found but we already alerted recently — just update state
+            print("✅ Booking is still open (already alerted recently).")
+            
+        elif result["date_available"] and not result["theatre_found"]:
+            # Date is open but theatre not listed
+            print(f"ℹ️  Date {target_date} is open, but theatre '{theatre_name}' is not listed.")
+            
+            # Update state — theatre not found
+            state[state_key] = {
+                "theatre_found": False,
+                "date_available": True,
+                "last_check_timestamp": time.time(),
+                "last_check_time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+                "done": state.get(state_key, {}).get("done", False),
+                "details": result["theatre_details"],
+            }
+            
+        else:
+            # Date not available yet
+            print(f"⏳ Booking has NOT opened yet for {target_date}.")
+            
+            # Update state
+            state[state_key] = {
+                "theatre_found": False,
+                "date_available": False,
+                "last_check_timestamp": time.time(),
+                "last_check_time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+                "done": state.get(state_key, {}).get("done", False),
+                "details": result["theatre_details"],
+            }
+    
+    # Save the accumulated state once after processing all targets
+    save_state(state)
     
     print("\n" + "=" * 60)
-    print("📊 RESULTS")
-    print("=" * 60)
-    print(f"   Date available:  {result['date_available']}")
-    print(f"   Theatre found:   {result['theatre_found']}")
-    print(f"   Details:         {result['theatre_details']}")
-    print(f"   Movie:           {result['movie_name']}")
-    if result['showtimes']:
-        print(f"   Showtimes:       {', '.join(result['showtimes'])}")
-    print("=" * 60)
-    
-    # Determine if we should alert
-    trigger = result["date_available"] and result["theatre_found"]
-    
-    if trigger and should_alert(state, state_key):
-        # 🎉 BOOKING IS OPEN — Send alert!
-        showtime_str = ", ".join(result["showtimes"]) if result["showtimes"] else "check page for times"
-        
-        message = (
-            f"🎟️🎟️🎟️ <b>TICKETS ARE OPEN!</b> 🎟️🎟️🎟️\n\n"
-            f"🎬 <b>{result['movie_name']}</b>\n"
-            f"🏢 <b>{theatre_name}</b>\n"
-            f"📅 <b>{target_date}</b>\n"
-            f"🕐 Showtimes: {showtime_str}\n\n"
-            f"🔗 <a href=\"{result['target_url']}\">BOOK NOW on BookMyShow</a>\n\n"
-            f"⚡ <b>GO GO GO — Book before it sells out!</b>\n\n"
-            f"<i>Run <code>python bms_checker.py --mark-done</code> after booking to stop reminders.</i>"
-        )
-        send_telegram(tg_token, tg_chat_id, message)
-        
-        # Update state
-        state[state_key] = {
-            "theatre_found": True,
-            "date_available": True,
-            "last_alert_timestamp": time.time(),
-            "last_alert_time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
-            "done": False,
-            "details": result["theatre_details"],
-        }
-        save_state(state)
-        print("\n🎉 ALERT SENT! Booking is open!")
-        
-    elif trigger:
-        # Theatre found but we already alerted recently — just update state
-        print("\n✅ Booking is still open (already alerted recently).")
-        
-    elif result["date_available"] and not result["theatre_found"]:
-        # Date is open but theatre not listed
-        print(f"\nℹ️  Date {target_date} is open, but theatre '{theatre_name}' is not listed.")
-        print("   The theatre may not be showing this movie, or listings are still being added.")
-        
-        # Update state — theatre not found
-        state[state_key] = {
-            "theatre_found": False,
-            "date_available": True,
-            "last_check_timestamp": time.time(),
-            "last_check_time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
-            "done": state.get(state_key, {}).get("done", False),
-            "details": result["theatre_details"],
-        }
-        save_state(state)
-        
-    else:
-        # Date not available yet
-        print(f"\n⏳ Booking has NOT opened yet for {target_date}. Will check again next run.")
-        
-        # Update state
-        state[state_key] = {
-            "theatre_found": False,
-            "date_available": False,
-            "last_check_timestamp": time.time(),
-            "last_check_time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
-            "done": state.get(state_key, {}).get("done", False),
-            "details": result["theatre_details"],
-        }
-        save_state(state)
-    
-    print(f"\n🕐 Next check: whenever cron runs this script again.")
+    print(f"🕐 Next check: whenever cron runs this script again.")
 
 
 if __name__ == "__main__":

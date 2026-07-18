@@ -45,10 +45,16 @@ jobs:
           BMS_THEATRE_NAME: ${{ vars.BMS_THEATRE_NAME }}
           BMS_TARGET_DATE: ${{ vars.BMS_TARGET_DATE }}
         run: |
-          python bms_checker.py \
-            --movie-url "$BMS_MOVIE_URL" \
-            --theatre "$BMS_THEATRE_NAME" \
-            --date "$BMS_TARGET_DATE"
+          if [ -f "targets.json" ]; then
+            echo "targets.json found. Running multi-target mode..."
+            python bms_checker.py --targets targets.json
+          else
+            echo "targets.json not found. Running single-target mode from variables..."
+            python bms_checker.py \
+              --movie-url "$BMS_MOVIE_URL" \
+              --theatre "$BMS_THEATRE_NAME" \
+              --date "$BMS_TARGET_DATE"
+          fi
 
       # Save state file for next run
       - name: Save state
