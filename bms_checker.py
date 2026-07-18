@@ -215,8 +215,9 @@ def check_bms(movie_url: str, theatre_name: str, target_date: str) -> dict:
         page = context.new_page()
         
         try:
-            # Navigate to the target date URL
-            page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            # Navigate to the target date URL (increase timeout if using proxy)
+            goto_timeout = 90000 if scraper_api_key else 30000
+            page.goto(target_url, wait_until="domcontentloaded", timeout=goto_timeout)
             # Wait for dynamic content to render
             page.wait_for_timeout(5000)
             
