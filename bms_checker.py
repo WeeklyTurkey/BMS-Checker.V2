@@ -231,7 +231,18 @@ def check_bms(movie_url: str, theatre_name: str, target_date: str) -> dict:
         try:
             # Navigate to the target date URL (increase timeout if using proxy)
             goto_timeout = 90000 if scraper_api_key else 30000
-            page.goto(target_url, wait_until="domcontentloaded", timeout=goto_timeout)
+            try:
+                page.goto(target_url, wait_until="domcontentloaded", timeout=goto_timeout)
+            except Exception as target_navigation_error:
+                # Some BMS responses reject a URL for a date that is not in
+                # the date picker. Load the supplied movie page instead so we
+                # can inspect its available date tabs and return a normal
+                # NOT AVAILABLE result rather than failing the whole target.
+                print(
+                    f"⚠️  Target date URL could not be opened; "
+                    f"checking the base movie page instead: {target_navigation_error}"
+                )
+                page.goto(movie_url, wait_until="domcontentloaded", timeout=goto_timeout)
             # Wait for dynamic content to render
             page.wait_for_timeout(5000)
             
