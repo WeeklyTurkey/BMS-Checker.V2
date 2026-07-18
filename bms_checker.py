@@ -25,6 +25,7 @@ import traceback
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import re
 import requests
 
 # ============================================================================
@@ -426,10 +427,13 @@ def _find_theatre(page, theatre_name: str) -> tuple:
                         # Walk up to find the parent container that includes showtimes
                         parent = el
                         for _ in range(10):  # Walk up max 10 levels
-                            parent_el = parent.evaluate_handle("el => el.parentElement")
-                            if not parent_el:
+                            try:
+                                parent_el = parent.evaluate_handle("el => el.parentElement")
+                                if not parent_el:
+                                    break
+                                parent_text = parent_el.evaluate("el => el.innerText || ''")
+                            except Exception:
                                 break
-                            parent_text = parent_el.evaluate("el => el.innerText || ''")
                             # Theatre containers typically have time patterns like "10:00" or "PM"
                             if ("AM" in parent_text or "PM" in parent_text) and len(parent_text) < 2000:
                                 theatre_container = parent_el
@@ -448,7 +452,6 @@ def _find_theatre(page, theatre_name: str) -> tuple:
             found = True
             
             # Extract showtime strings (patterns like "10:00 AM", "04:30 PM")
-            import re
             time_pattern = re.compile(r'\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)', re.IGNORECASE)
             times_found = time_pattern.findall(container_text)
             showtimes = [t.strip() for t in times_found]
@@ -461,7 +464,7 @@ def _find_theatre(page, theatre_name: str) -> tuple:
             details = f"Theatre '{theatre_name}' found on page (could not isolate specific container)"
             
             # Try to extract times from nearby text
-            import re
+            # Try to extract times from nearby text
             # Find theatre name position and grab surrounding text
             lower_body = body_text.lower()
             idx = lower_body.find(theatre_name_lower)
@@ -565,12 +568,19 @@ Examples:
             "date": target_date
         }]
     
-    # Validate date format for all targets
-    for t in targets:
+    # Validate required keys and date format for all targets
+    for i, t in enumerate(targets):
+        for required_key in ["theatre", "date"]:
+            if required_key not in t:
+                print(f"ERROR: Target {i+1} is missing required key '{required_key}'")
+                sys.exit(1)
+        if not (t.get("movie_url") or t.get("url")):
+            print(f"ERROR: Target {i+1} is missing 'movie_url' or 'url'")
+            sys.exit(1)
         try:
             datetime.strptime(t["date"], "%Y-%m-%d")
         except ValueError:
-            print(f"ERROR: Invalid date format '{t['date']}' in target. Use YYYY-MM-DD.")
+            print(f"ERROR: Invalid date format '{t['date']}' in target {i+1}. Use YYYY-MM-DD.")
             sys.exit(1)
     
     # Load Telegram config
@@ -587,6 +597,10 @@ Examples:
         movie_url = target.get("movie_url") or target.get("url")
         theatre_name = target["theatre"]
         target_date = target["date"]
+        
+        if not movie_url:
+            print(f"⚠️  Skipping target {i+1}: missing 'movie_url' or 'url' value")
+            continue
         
         state_key = f"{theatre_name.lower()}_{target_date}"
         print(f"\n▶️  Target {i+1}/{len(targets)}: {theatre_name} on {target_date}")
@@ -606,6 +620,7 @@ Examples:
             )
             send_telegram(tg_token, tg_chat_id, error_msg)
             print(f"❌ Script failed for this target. Error alert sent via Telegram.")
+            save_state(state)  # Save state so far to avoid losing progress
             continue
         
         print("-" * 40)
