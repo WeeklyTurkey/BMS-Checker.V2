@@ -1,0 +1,59 @@
+name: BMS Ticket Checker
+
+on:
+  # Run every hour at minute 0
+  schedule:
+    - cron: '0 * * * *'
+  
+  # Allow manual trigger from GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  check-tickets:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install chromium
+          python -m playwright install-deps chromium
+
+      # Restore state file from previous run (if any)
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: bms_state.json
+          key: bms-state-${{ github.ref }}
+          restore-keys: |
+            bms-state-
+
+      - name: Run BMS Checker
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BMS_MOVIE_URL: ${{ vars.BMS_MOVIE_URL }}
+          BMS_THEATRE_NAME: ${{ vars.BMS_THEATRE_NAME }}
+          BMS_TARGET_DATE: ${{ vars.BMS_TARGET_DATE }}
+        run: |
+          python bms_checker.py \
+            --movie-url "$BMS_MOVIE_URL" \
+            --theatre "$BMS_THEATRE_NAME" \
+            --date "$BMS_TARGET_DATE"
+
+      # Save state file for next run
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: bms_state.json
+          key: bms-state-${{ github.ref }}-${{ github.run_id }}
