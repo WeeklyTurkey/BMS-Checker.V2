@@ -463,31 +463,42 @@ def _find_theatre(page, theatre_name: str) -> tuple:
                 continue
         
         if theatre_container:
-            # Extract showtime strings using JS to check if they are actually clickable/available
+            # Extract showtimes using the current BMS markup. BMS renders these
+            # as div[role="button"] rather than links, and its generated class
+            # names encode the state: eUDeRW = available, hlrCBW = fast
+            # filling, clNJKa = unavailable/sold out in the current UI.
             times_found = theatre_container.evaluate('''el => {
                 const times = [];
-                // Find all links or divs in the container
-                const elements = el.querySelectorAll('a, div');
+                const elements = el.querySelectorAll('a, div[role="button"]');
                 for (const child of elements) {
                     let text = child.innerText || '';
-                    // Check if it looks like a time
-                    if (text.match(/\\d{1,2}:\\d{2}\\s*(?:AM|PM|am|pm)/i) && text.length < 15) {
+                    if (text.match(/^\\s*\\d{1,2}:\\d{2}\\s*(?:AM|PM|am|pm)/i) && text.length < 120) {
                         let isAvailable = true;
-                        
-                        // Check 1: Pointer events (greyed out usually has none)
+
+                        const className = String(child.className || '').toLowerCase();
+                        const ariaDisabled = child.getAttribute('aria-disabled') === 'true';
+                        const nativeDisabled = child.hasAttribute('disabled');
                         const style = window.getComputedStyle(child);
-                        if (style.pointerEvents === 'none') {
+                        if (ariaDisabled || nativeDisabled ||
+                            style.pointerEvents === 'none' ||
+                            style.display === 'none' ||
+                            style.visibility === 'hidden') {
                             isAvailable = false;
                         }
-                        
-                        // Check 2: Missing href on an <a> tag
-                        if (child.tagName.toLowerCase() === 'a' && !child.getAttribute('href')) {
-                            isAvailable = false;
-                        }
-                        
-                        // Check 3: Classes
-                        const className = (child.className || '').toLowerCase();
-                        if (className.includes('sold') || className.includes('disabled') || className.includes('grey')) {
+
+                        // Current BMS React markup uses these generated classes
+                        // for showtime states. Keep the positive allow-list so
+                        // a grey/sold-out slot cannot trigger an alert.
+                        const currentBmsAvailable =
+                            className.includes('euderw') || className.includes('hlrcbw');
+                        const currentBmsUnavailable =
+                            className.includes('clnjka') ||
+                            className.includes('sold') ||
+                            className.includes('disabled') ||
+                            className.includes('grey') ||
+                            className.includes('unavailable');
+                        if (currentBmsUnavailable ||
+                            (child.getAttribute('role') === 'button' && !currentBmsAvailable)) {
                             isAvailable = false;
                         }
                         
