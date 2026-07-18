@@ -44,6 +44,7 @@ jobs:
           BMS_MOVIE_URL: ${{ vars.BMS_MOVIE_URL }}
           BMS_THEATRE_NAME: ${{ vars.BMS_THEATRE_NAME }}
           BMS_TARGET_DATE: ${{ vars.BMS_TARGET_DATE }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: |
           if [ -f "targets.json" ]; then
             echo "targets.json found. Running multi-target mode..."

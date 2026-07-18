@@ -192,7 +192,19 @@ def check_bms(movie_url: str, theatre_name: str, target_date: str) -> dict:
     print(f"🎯 Looking for theatre: '{theatre_name}' on date: {target_date}")
     
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # Check if ScraperAPI is configured for residential proxying
+        scraper_api_key = os.environ.get("SCRAPER_API_KEY")
+        launch_kwargs = {"headless": True}
+        
+        if scraper_api_key:
+            print("🛡️  Routing request through ScraperAPI (India Proxy)...")
+            launch_kwargs["proxy"] = {
+                "server": "http://proxy-server.scraperapi.com:8001",
+                "username": "scraperapi.country_code=in",
+                "password": scraper_api_key
+            }
+            
+        browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(
             user_agent=USER_AGENT,
             viewport={"width": 1280, "height": 900},

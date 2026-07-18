@@ -220,6 +220,7 @@ git push -u origin main
 2. Under **Secrets** tab, click **New repository secret** and add:
    - Name: `TELEGRAM_BOT_TOKEN` → Value: your bot token
    - Name: `TELEGRAM_CHAT_ID` → Value: your chat ID
+   - Name: `SCRAPER_API_KEY` → Value: your ScraperAPI key (from scraperapi.com dashboard)
 
 ### 6c. Add Variables (Movie config)
 
