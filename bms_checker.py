@@ -345,8 +345,23 @@ def _check_date_tab(page, target_date: str, target_dt: datetime) -> bool:
     """
     date_str_for_url = target_date.replace("-", "")
     try:
-        # Do not search every anchor: cinema/showtime links also contain dates.
-        # BMS's picker uses the date-href class in the current page structure.
+        # BMS currently renders date-picker entries as divs whose IDs are the
+        # date code (for example id="20260720"), not as a.date-href anchors.
+        # Check that exact ID first so cinema/showtime links cannot create a
+        # false positive.
+        date_elements = page.locator(f'[id="{date_str_for_url}"]')
+        if date_elements.count() > 0:
+            tab = date_elements.first
+            try:
+                tab.click()
+                page.wait_for_timeout(2500)
+                print(f"   ✅ Found and selected date {target_date} in the date picker")
+            except Exception as e:
+                print(f"   ⚠️  Date {target_date} exists but could not be selected: {e}")
+                return False
+            return True
+
+        # Compatibility fallback for older BMS markup.
         tabs = page.locator("a.date-href")
         matching = []
         for tab in tabs.all():
