@@ -27,6 +27,7 @@ from pathlib import Path
 
 import re
 import requests
+from urllib.parse import urlsplit, urlunsplit
 
 # ============================================================================
 # CONFIG — Set your defaults here (CLI args override these)
@@ -169,15 +170,18 @@ def check_bms(movie_url: str, theatre_name: str, target_date: str) -> dict:
     # Reconstruct the URL with the target date
     # BMS URLs look like: https://in.bookmyshow.com/buytickets/movie-name-city/movie-city-CODE-MT/YYYYMMDD
     # We replace the last segment (date) or append it
-    url_parts = movie_url.rstrip("/").split("/")
-    
-    # Check if last segment looks like a date (8 digits)
-    if url_parts[-1].isdigit() and len(url_parts[-1]) == 8:
-        url_parts[-1] = date_str_for_url
+    # Replace only the path's final date segment, preserving query strings and
+    # fragments. This also handles URLs copied from BMS with a trailing slash.
+    parsed_url = urlsplit(movie_url)
+    path = parsed_url.path.rstrip("/")
+    path_parts = path.split("/")
+    if path_parts and re.fullmatch(r"\d{8}", path_parts[-1] or ""):
+        path_parts[-1] = date_str_for_url
     else:
-        url_parts.append(date_str_for_url)
-    
-    target_url = "/".join(url_parts)
+        path_parts.append(date_str_for_url)
+    target_url = urlunsplit((parsed_url.scheme, parsed_url.netloc,
+                             "/".join(path_parts), parsed_url.query,
+                             parsed_url.fragment))
     
     result = {
         "date_available": False,
@@ -329,26 +333,39 @@ def _check_date_tab(page, target_date: str, target_dt: datetime) -> bool:
     """
     date_str_for_url = target_date.replace("-", "")
     try:
-        # The date tabs on BMS typically have an href containing the date string (e.g., /20260829)
-        date_elements = page.locator(f"a[href*='{date_str_for_url}']")
-        count = date_elements.count()
-        if count > 0:
-            print(f"   ✅ Found clickable date tab for {target_date}")
-            return True
-            
-        # Fallback: check by visible text if href matching fails
-        target_day = str(target_dt.day)
-        target_month = target_dt.strftime("%b").upper() # e.g. JUL
-        
-        all_links = page.locator("a").all()
-        for link in all_links:
-            text = link.inner_text().strip().upper()
-            if target_day in text and target_month in text and len(text) < 20:
-                print(f"   ✅ Found date tab matching text '{text}' for {target_date}")
-                return True
-                
-        print(f"   ❌ Date tab for {target_date} not found in DOM.")
-        return False
+        # Do not search every anchor: cinema/showtime links also contain dates.
+        # BMS's picker uses the date-href class in the current page structure.
+        tabs = page.locator("a.date-href")
+        matching = []
+        for tab in tabs.all():
+            href = tab.get_attribute("href") or ""
+            href_date = re.search(r"/(\d{8})(?:[/?#]|$)", href)
+            text = re.sub(r"\s+", " ", tab.inner_text()).strip().upper()
+            if (href_date and href_date.group(1) == date_str_for_url) or (
+                str(target_dt.day) in text and target_dt.strftime("%b").upper() in text
+            ):
+                matching.append(tab)
+
+        if not matching:
+            print(f"   ❌ Date tab for {target_date} not found in the BMS date picker.")
+            return False
+
+        tab = matching[0]
+        classes = (tab.get_attribute("class") or "").lower()
+        parent_classes = (tab.locator("..").get_attribute("class") or "").lower()
+        aria_current = (tab.get_attribute("aria-current") or "").lower()
+        is_active = "active" in classes or "active" in parent_classes or aria_current in {"date", "true", "page"}
+        if not is_active:
+            try:
+                tab.click()
+                page.wait_for_timeout(2500)
+                print(f"   ✅ Selected date tab for {target_date}")
+            except Exception as e:
+                print(f"   ⚠️  Date tab exists but could not be selected: {e}")
+                return False
+        else:
+            print(f"   ✅ Date tab for {target_date} is active")
+        return True
     except Exception as e:
         print(f"   ⚠️  Error checking date tabs: {e}")
         return False
