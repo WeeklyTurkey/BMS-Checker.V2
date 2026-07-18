@@ -210,6 +210,7 @@ def check_bms(movie_url: str, theatre_name: str, target_date: str) -> dict:
             viewport={"width": 1280, "height": 900},
             locale="en-IN",
             timezone_id="Asia/Kolkata",
+            ignore_https_errors=bool(scraper_api_key)
         )
         page = context.new_page()
         
