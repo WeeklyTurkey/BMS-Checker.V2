@@ -365,7 +365,9 @@ def _check_date_tab(page, target_date: str, target_dt: datetime) -> bool:
             tab = date_elements.first
             try:
                 tab.click()
-                page.wait_for_timeout(2500)
+                # BMS updates the theatre list asynchronously after the date
+                # click; allow the response/render cycle to finish.
+                page.wait_for_timeout(6000)
                 print(f"   ✅ Found and selected date {target_date} in the date picker")
             except Exception as e:
                 print(f"   ⚠️  Date {target_date} exists but could not be selected: {e}")
@@ -396,7 +398,7 @@ def _check_date_tab(page, target_date: str, target_dt: datetime) -> bool:
         if not is_active:
             try:
                 tab.click()
-                page.wait_for_timeout(2500)
+                page.wait_for_timeout(6000)
                 print(f"   ✅ Selected date tab for {target_date}")
             except Exception as e:
                 print(f"   ⚠️  Date tab exists but could not be selected: {e}")
