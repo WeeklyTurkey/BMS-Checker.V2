@@ -716,8 +716,22 @@ Examples:
             print("✅ Booking is still open (already alerted recently).")
             
         elif result["date_available"] and not result["theatre_found"]:
-            # Date is open but theatre not listed
-            print(f"ℹ️  Date {target_date} is open, but theatre '{theatre_name}' is not listed.")
+            # Date is open but there are no available showtimes. This includes
+            # a theatre that is listed with only greyed-out/sold-out slots.
+            print(f"ℹ️  No available showtimes for '{theatre_name}' on {target_date}.")
+            previous = state.get(state_key, {})
+            if not previous.get("status_notified", False):
+                status_message = (
+                    f"ℹ️ <b>BMS availability update</b>\n\n"
+                    f"🎬 <b>{html.escape(result['movie_name'] or 'Movie')}</b>\n"
+                    f"🏢 <b>{html.escape(theatre_name)}</b>\n"
+                    f"📅 <b>{html.escape(target_date)}</b>\n\n"
+                    f"❌ <b>NOT AVAILABLE</b>\n"
+                    f"{html.escape(result['theatre_details'])}"
+                )
+                status_sent = send_telegram(tg_token, tg_chat_id, status_message)
+            else:
+                status_sent = True
             
             # Update state — theatre not found
             state[state_key] = {
@@ -725,8 +739,9 @@ Examples:
                 "date_available": True,
                 "last_check_timestamp": time.time(),
                 "last_check_time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
-                "done": state.get(state_key, {}).get("done", False),
+                "done": previous.get("done", False),
                 "details": result["theatre_details"],
+                "status_notified": previous.get("status_notified", False) or status_sent,
             }
             
         else:
