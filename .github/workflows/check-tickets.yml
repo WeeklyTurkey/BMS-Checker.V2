@@ -57,6 +57,17 @@ jobs:
               --date "$BMS_TARGET_DATE"
           fi
 
+      - name: Write result summary
+        if: always()
+        run: |
+          {
+            echo "## BMS checker result"
+            echo ""
+            echo "The script prints one explicit NOT AVAILABLE result when the requested date is absent from BookMyShow's date picker."
+            echo ""
+            echo "See the Run BMS Checker step for the per-target result and Telegram API response."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # Save state file for next run
       - name: Save state
         if: always()

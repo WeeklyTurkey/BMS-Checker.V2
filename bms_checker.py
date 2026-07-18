@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import html
 import json
 import os
 import sys
@@ -69,8 +70,8 @@ def get_telegram_config():
     return token, chat_id
 
 
-def send_telegram(token: str, chat_id: str, message: str):
-    """Send a message via Telegram Bot API."""
+def send_telegram(token: str, chat_id: str, message: str) -> bool:
+    """Send a message via Telegram Bot API and return whether it succeeded."""
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -80,12 +81,21 @@ def send_telegram(token: str, chat_id: str, message: str):
     }
     try:
         resp = requests.post(url, json=payload, timeout=15)
-        if resp.status_code == 200:
+        try:
+            response_data = resp.json()
+        except ValueError:
+            response_data = {}
+
+        if resp.status_code == 200 and response_data.get("ok") is True:
             print(f"✅ Telegram message sent successfully.")
+            return True
         else:
-            print(f"⚠️  Telegram API returned {resp.status_code}: {resp.text}")
+            description = response_data.get("description") or resp.text
+            print(f"⚠️  Telegram API failed ({resp.status_code}): {description}")
+            return False
     except Exception as e:
         print(f"❌ Failed to send Telegram message: {e}")
+        return False
 
 
 # ============================================================================
@@ -245,9 +255,11 @@ def check_bms(movie_url: str, theatre_name: str, target_date: str) -> dict:
             result["date_available"] = date_available
             
             if not date_available:
-                result["theatre_details"] = f"Date {target_date} tab appears greyed out / not yet open"
-                print(f"⚠️  Date tab for {target_date} appears greyed out.")
-                browser.close()
+                result["theatre_details"] = (
+                    f"NOT AVAILABLE: date {target_date} is not present in the "
+                    "BookMyShow date picker"
+                )
+                print(f"⚠️  NOT AVAILABLE: date {target_date} is not present in the date picker.")
                 return result
             
             print(f"✅ Date {target_date} is available for booking!")
@@ -692,8 +704,22 @@ Examples:
             }
             
         else:
-            # Date not available yet
-            print(f"⏳ Booking has NOT opened yet for {target_date}.")
+            # Date not available yet. Notify once so a successful workflow does
+            # not look silent, then suppress repeats until the state changes.
+            print(f"⏳ NOT AVAILABLE: booking has not opened for {target_date}.")
+            previous = state.get(state_key, {})
+            if not previous.get("status_notified", False):
+                status_message = (
+                    f"ℹ️ <b>BMS availability update</b>\n\n"
+                    f"🎬 <b>{html.escape(result['movie_name'] or 'Movie')}</b>\n"
+                    f"🏢 <b>{html.escape(theatre_name)}</b>\n"
+                    f"📅 <b>{html.escape(target_date)}</b>\n\n"
+                    f"❌ <b>NOT AVAILABLE</b>\n"
+                    f"{html.escape(result['theatre_details'])}"
+                )
+                status_sent = send_telegram(tg_token, tg_chat_id, status_message)
+            else:
+                status_sent = True
             
             # Update state
             state[state_key] = {
@@ -703,6 +729,7 @@ Examples:
                 "last_check_time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
                 "done": state.get(state_key, {}).get("done", False),
                 "details": result["theatre_details"],
+                "status_notified": previous.get("status_notified", False) or status_sent,
             }
     
     # Save the accumulated state once after processing all targets
