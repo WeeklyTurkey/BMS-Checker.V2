@@ -444,8 +444,28 @@ def _find_theatre(page, theatre_name: str) -> tuple:
         ]
         
         theatre_container = None
+
+        # Current BMS markup labels venue names with this generated class.
+        # Start here so partial names such as "ALLU" resolve to the actual
+        # venue row before using the broader fallback selectors below.
+        try:
+            venue_names = page.locator("span[class*='eXSbEM']").all()
+            for venue in venue_names:
+                if theatre_name_lower in venue.inner_text().strip().lower():
+                    parent = venue
+                    for _ in range(10):
+                        if parent.locator('div[role="button"]').count() > 0:
+                            theatre_container = parent
+                            break
+                        parent = parent.locator("..")
+                    if theatre_container:
+                        break
+        except Exception:
+            pass
         
         for selector in theatre_selectors:
+            if theatre_container:
+                break
             try:
                 elements = page.query_selector_all(selector)
                 for el in elements:
@@ -502,8 +522,6 @@ def _find_theatre(page, theatre_name: str) -> tuple:
                         // Current BMS React markup uses these generated classes
                         // for showtime states. Keep the positive allow-list so
                         // a grey/sold-out slot cannot trigger an alert.
-                        const currentBmsAvailable =
-                            className.includes('euderw') || className.includes('hlrcbw');
                         const currentBmsUnavailable =
                             className.includes('clnjka') ||
                             className.includes('sold') ||
@@ -517,15 +535,15 @@ def _find_theatre(page, theatre_name: str) -> tuple:
                             return Math.max(...channels) - Math.min(...channels) > 35;
                         };
                         // BMS uses yellow borders for FAST FILLING and green
-                        // borders for AVAILABLE. This fallback handles CSS
-                        // class-name changes between BMS deployments.
+                        // borders for AVAILABLE. A grey slot is unavailable;
+                        // any non-grey, interactive slot is available.
                         const visuallyAvailable =
                             isVivid(style.borderLeftColor) ||
                             isVivid(style.borderColor) ||
                             isVivid(style.backgroundColor);
                         if (currentBmsUnavailable ||
                             (child.getAttribute('role') === 'button' &&
-                             !currentBmsAvailable && !visuallyAvailable)) {
+                             !visuallyAvailable)) {
                             isAvailable = false;
                         }
                         
