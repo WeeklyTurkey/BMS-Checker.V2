@@ -229,27 +229,14 @@ def check_bms(movie_url: str, theatre_name: str, target_date: str) -> dict:
             print(f"🎬 Movie: {result['movie_name']}")
             
             # ── Step 3: Check if the target date is available ──
-            #
             # BMS behavior: If a date hasn't opened for booking yet,
-            # navigating to its URL redirects back to the nearest available date.
-            # We detect this by checking:
-            #   a) The current URL's date segment
-            #   b) Which date tab is currently selected/highlighted
-            #   c) Whether the target date tab appears greyed out
+            # navigating to its URL does NOT redirect. It just silently loads the
+            # nearest available date (usually today). We MUST verify the date tab exists.
             
             current_url = page.url
             print(f"📍 Landed on URL: {current_url}")
             
-            # Check if we got redirected away from our target date
-            if date_str_for_url not in current_url:
-                print(f"⚠️  Redirected away from target date {target_date}!")
-                print(f"   This means booking has NOT opened for this date yet.")
-                result["date_available"] = False
-                result["theatre_details"] = f"Date {target_date} not yet available (redirected to different date)"
-                browser.close()
-                return result
-            
-            # Also verify by checking the date tabs in the DOM
+            # Verify by checking the date tabs in the DOM
             date_available = _check_date_tab(page, target_date, target_dt)
             result["date_available"] = date_available
             
@@ -335,66 +322,36 @@ def _extract_movie_name(page) -> str:
 
 def _check_date_tab(page, target_date: str, target_dt: datetime) -> bool:
     """
-    Check whether the target date tab is active (booking open) or greyed out.
-    
-    BMS date tabs structure:
-    - Active/available dates are inside clickable <a> or interactive <div> elements
-    - Greyed/unavailable dates have reduced opacity or different styling
-    - The currently selected date has a highlight (usually red/pink background)
-    
-    If we successfully navigated to the target date URL without redirect,
-    the date is very likely available. This function does additional DOM verification.
+    Check whether the target date exists in the date picker.
+    BMS does not redirect when an invalid/future date is requested; it just defaults
+    to today's date in the UI. 
+    If the requested date tab is not rendered in the DOM, booking is not open.
     """
-    target_day = str(target_dt.day)
-    
+    date_str_for_url = target_date.replace("-", "")
     try:
-        # Look for date scroll container and individual date items
-        # BMS uses a horizontal scrollable date picker
-        date_items = page.query_selector_all('[class*="date-"] a, [class*="Date"] a, [class*="scroll"] a[href*="buytickets"]')
+        # The date tabs on BMS typically have an href containing the date string (e.g., /20260829)
+        date_elements = page.locator(f"a[href*='{date_str_for_url}']")
+        count = date_elements.count()
+        if count > 0:
+            print(f"   ✅ Found clickable date tab for {target_date}")
+            return True
+            
+        # Fallback: check by visible text if href matching fails
+        target_day = str(target_dt.day)
+        target_month = target_dt.strftime("%b").upper() # e.g. JUL
         
-        if date_items:
-            for item in date_items:
-                text = item.inner_text().strip()
-                href = item.get_attribute("href") or ""
+        all_links = page.locator("a").all()
+        for link in all_links:
+            text = link.inner_text().strip().upper()
+            if target_day in text and target_month in text and len(text) < 20:
+                print(f"   ✅ Found date tab matching text '{text}' for {target_date}")
+                return True
                 
-                date_str = target_dt.strftime("%Y%m%d")
-                if date_str in href:
-                    # Found a link for our target date — it's clickable = available
-                    print(f"   ✅ Found clickable date tab for {target_date}")
-                    return True
-        
-        # Alternative approach: check all elements containing the day number
-        # and see if any match our target date
-        all_date_elements = page.query_selector_all('[class*="date"], [class*="Date"], [class*="day"], [class*="Day"]')
-        
-        for el in all_date_elements:
-            text = el.inner_text().strip()
-            if target_day in text:
-                # Check if this element or its parent has a 'disabled' or 'grey' indicator
-                classes = el.get_attribute("class") or ""
-                opacity = el.evaluate("el => window.getComputedStyle(el).opacity")
-                color = el.evaluate("el => window.getComputedStyle(el).color")
-                pointer = el.evaluate("el => window.getComputedStyle(el).pointerEvents")
-                
-                print(f"   Date tab '{text}': opacity={opacity}, color={color}, pointer-events={pointer}")
-                
-                # Greyed out typically has lower opacity or grey color
-                if opacity and float(opacity) < 0.5:
-                    return False
-                if pointer == "none":
-                    return False
-                if "disabled" in classes.lower() or "grey" in classes.lower():
-                    return False
-        
-        # If we got here and the URL wasn't redirected, assume available
-        # (the URL check in the main function is the most reliable indicator)
-        print("   ℹ️  Could not definitively verify date tab state via DOM, but URL check passed.")
-        return True
-        
+        print(f"   ❌ Date tab for {target_date} not found in DOM.")
+        return False
     except Exception as e:
         print(f"   ⚠️  Error checking date tabs: {e}")
-        # If URL wasn't redirected, assume available
-        return True
+        return False
 
 
 def _find_theatre(page, theatre_name: str) -> tuple:
@@ -462,34 +419,57 @@ def _find_theatre(page, theatre_name: str) -> tuple:
                 continue
         
         if theatre_container:
-            container_text = theatre_container.evaluate("el => el.innerText || ''")
-            found = True
+            # Extract showtime strings using JS to check if they are actually clickable/available
+            times_found = theatre_container.evaluate('''el => {
+                const times = [];
+                // Find all links or divs in the container
+                const elements = el.querySelectorAll('a, div');
+                for (const child of elements) {
+                    let text = child.innerText || '';
+                    // Check if it looks like a time
+                    if (text.match(/\\d{1,2}:\\d{2}\\s*(?:AM|PM|am|pm)/i) && text.length < 15) {
+                        let isAvailable = true;
+                        
+                        // Check 1: Pointer events (greyed out usually has none)
+                        const style = window.getComputedStyle(child);
+                        if (style.pointerEvents === 'none') {
+                            isAvailable = false;
+                        }
+                        
+                        // Check 2: Missing href on an <a> tag
+                        if (child.tagName.toLowerCase() === 'a' && !child.getAttribute('href')) {
+                            isAvailable = false;
+                        }
+                        
+                        // Check 3: Classes
+                        const className = (child.className || '').toLowerCase();
+                        if (className.includes('sold') || className.includes('disabled') || className.includes('grey')) {
+                            isAvailable = false;
+                        }
+                        
+                        if (isAvailable) {
+                            times.push(text.trim());
+                        }
+                    }
+                }
+                // deduplicate
+                return Array.from(new Set(times));
+            }''')
             
-            # Extract showtime strings (patterns like "10:00 AM", "04:30 PM")
-            time_pattern = re.compile(r'\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)', re.IGNORECASE)
-            times_found = time_pattern.findall(container_text)
             showtimes = [t.strip() for t in times_found]
             
-            details = f"Theatre '{theatre_name}' found with {len(showtimes)} showtime(s): {', '.join(showtimes) if showtimes else 'see page'}"
+            if showtimes:
+                found = True
+                details = f"Theatre '{theatre_name}' found with {len(showtimes)} AVAILABLE showtime(s): {', '.join(showtimes)}"
+            else:
+                found = False
+                details = f"Theatre '{theatre_name}' found, but all showtimes appear SOLD OUT (greyed out)."
         else:
             # Fallback: theatre name exists on page but we couldn't isolate the container
-            # This still means the theatre is listed
-            found = True
-            details = f"Theatre '{theatre_name}' found on page (could not isolate specific container)"
-            
-            # Try to extract times from nearby text
-            # Try to extract times from nearby text
-            # Find theatre name position and grab surrounding text
-            lower_body = body_text.lower()
-            idx = lower_body.find(theatre_name_lower)
-            if idx >= 0:
-                # Grab text around the theatre name (500 chars after)
-                snippet = body_text[idx:idx+500]
-                time_pattern = re.compile(r'\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)', re.IGNORECASE)
-                times_found = time_pattern.findall(snippet)
-                showtimes = [t.strip() for t in times_found]
-                if showtimes:
-                    details += f" — Showtimes: {', '.join(showtimes)}"
+            # This still means the theatre is listed, but we don't know if they are available.
+            # To avoid false positives on sold-out days, we assume not found if we can't verify times.
+            found = False
+            details = f"Theatre '{theatre_name}' found on page but could not extract showtimes to verify availability."
     
     except Exception as e:
         print(f"   ⚠️  Error searching for theatre: {e}")
