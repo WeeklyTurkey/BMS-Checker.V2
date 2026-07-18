@@ -510,8 +510,22 @@ def _find_theatre(page, theatre_name: str) -> tuple:
                             className.includes('disabled') ||
                             className.includes('grey') ||
                             className.includes('unavailable');
+                        const isVivid = (color) => {
+                            const match = color.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/i);
+                            if (!match) return false;
+                            const channels = match.slice(1, 4).map(Number);
+                            return Math.max(...channels) - Math.min(...channels) > 35;
+                        };
+                        // BMS uses yellow borders for FAST FILLING and green
+                        // borders for AVAILABLE. This fallback handles CSS
+                        // class-name changes between BMS deployments.
+                        const visuallyAvailable =
+                            isVivid(style.borderLeftColor) ||
+                            isVivid(style.borderColor) ||
+                            isVivid(style.backgroundColor);
                         if (currentBmsUnavailable ||
-                            (child.getAttribute('role') === 'button' && !currentBmsAvailable)) {
+                            (child.getAttribute('role') === 'button' &&
+                             !currentBmsAvailable && !visuallyAvailable)) {
                             isAvailable = false;
                         }
                         
