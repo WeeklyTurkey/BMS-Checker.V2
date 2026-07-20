@@ -220,7 +220,40 @@ git push -u origin main
 2. Under **Secrets** tab, click **New repository secret** and add:
    - Name: `TELEGRAM_BOT_TOKEN` → Value: your bot token
    - Name: `TELEGRAM_CHAT_ID` → Value: your chat ID
-   - Name: `SCRAPER_API_KEY` → Value: your ScraperAPI key (from scraperapi.com dashboard)
+   - Name: `SCRAPER_API_KEY` → Value: your ScraperAPI key
+
+   **Primary provider: [ScraperAPI](https://scraperapi.com)**, via its proxy
+   port method (`proxy-server.scraperapi.com:8001`, username `scraperapi.country_code=in`,
+   password = your API key — this is all wired up automatically once
+   `SCRAPER_API_KEY` is set).
+
+   ⚠️ **Cost heads-up:** ScraperAPI's standard `country_code` geotargeting
+   only covers US/EU on Hobby and Startup plans — India geotargeting
+   (`country_code=in`) requires a **Business/Enterprise plan**. On a lower
+   tier, requesting India IPs can silently fall back to Premium/residential
+   billing *per request*, which is the most likely reason credits vanished
+   in ~1.5 days on a 5,000-credit trial. Check your plan tier before relying
+   on `country_code=in`.
+
+   The script now also blocks (a) images/fonts/media before download, and
+   (b) requests to known ad/analytics/tracker/recaptcha domains —
+   `doubleclick.net`, `googletagmanager.com`, `google.com`, `branch.io`,
+   `app.link`, and Google Fonts — via `BLOCK_RESOURCE_TYPES` and
+   `BLOCK_DOMAINS` in `bms_checker.py`. Per-domain analytics showed those
+   tracker domains alone accounting for close to half of billed credits on
+   a real run, contributing zero useful data. Each check now prints a
+   summary line (`📊 Requests: N allowed, N blocked...`) so you can see the
+   savings directly in the logs.
+
+   **Alternative / bring-your-own provider:** if you'd rather not deal with
+   ScraperAPI's plan-tier geotargeting limits, leave `SCRAPER_API_KEY`
+   unset and instead set `PROXY_SERVER` / `PROXY_USERNAME` / `PROXY_PASSWORD`
+   to any provider with a plain HTTP proxy gateway — e.g.
+   [DataImpulse](https://dataimpulse.com) (pay-as-you-go by the GB, balance
+   never expires), IPRoyal, Webshare, Smartproxy, or Bright Data. You want
+   *residential*, not datacenter, IPs with India geo-targeting, since BMS
+   blocks most datacenter ranges. These three env vars are only used as a
+   fallback when `SCRAPER_API_KEY` isn't set.
 
 ### 6c. Add Variables (Movie config)
 
@@ -292,6 +325,13 @@ Error: TimeoutError: page.goto: Timeout 30000ms exceeded...
 👉 Check manually — the script might be broken or BMS changed their page structure.
 ```
 
+Before this alert fires, the script retries the same target up to
+`RETRY_ATTEMPTS` times with backoff (residential proxy hiccups are common
+and usually resolve on retry). If a target keeps failing with the exact
+same error, you'll only get re-alerted once an hour for it, not every run,
+so a known ongoing issue doesn't spam you — a *different* error still
+alerts immediately.
+
 ---
 
 ## Re-Alert Behavior
@@ -334,6 +374,7 @@ cat bms_state.json
 | BMS page structure changed | The script sends a failure alert via Telegram. Open an issue or update selectors. |
 | `Error: Browser closed` on Linux server | Run `python -m playwright install-deps chromium` for system libs |
 | GitHub Actions not triggering | Check Actions tab for errors. Scheduled workflows may be delayed by a few minutes. |
+| Proxy/API "out of credits" or 407/402 errors | Check your provider's dashboard balance. Pay-as-you-go providers like DataImpulse don't expire balances, so this usually means you're actually out of funds — top up, or switch providers by updating the three `PROXY_*` secrets. |
 
 ---
 
@@ -344,13 +385,22 @@ bms-checker/
 ├── .github/
 │   └── workflows/
 │       └── check-tickets.yml   # GitHub Actions workflow (runs every hour)
-├── .gitignore                  # Ignores state files and caches
+├── .gitignore                  # Ignores state files, caches, debug dumps
 ├── bms_checker.py              # Main script
 ├── requirements.txt            # Python dependencies
 ├── README.md                   # This file
+├── targets.json                # Optional: multi-target config
+├── dev/                        # One-off scripts used while reverse-engineering
+│   └── ...                     # BMS's DOM (not part of the running pipeline)
 ├── bms_state.json              # Auto-generated state file (after first run)
 └── cron.log                    # Cron output log (if using local cron)
 ```
+
+> The `dev/` scripts were used to inspect BMS's page structure while
+> building the selectors in `bms_checker.py` (date tabs, theatre containers,
+> showtime buttons). They hit BMS directly, bypass the proxy, and aren't
+> needed to run the checker — kept only as a reference if BMS changes its
+> markup again and you need to re-inspect it.
 
 ---
 

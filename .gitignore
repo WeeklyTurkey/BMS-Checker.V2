@@ -15,3 +15,9 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Debug artifacts from dev/ scripts (page dumps, screenshots)
+bms_page.html
+*.png
+dev/*.html
+dev/*.png

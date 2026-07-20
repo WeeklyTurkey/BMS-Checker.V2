@@ -26,6 +26,8 @@ import traceback
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import hashlib
+import random
 import re
 import requests
 from urllib.parse import urlsplit, urlunsplit
@@ -43,6 +45,46 @@ STATE_FILE = Path(__file__).parent / "bms_state.json"
 # Re-alert interval: if booking is open and you haven't marked it done,
 # re-send a reminder after this many seconds (1 hour = 3600)
 RE_ALERT_INTERVAL_SECONDS = 3600  # 1 hour
+
+# If a target keeps failing with the SAME error, don't re-alert every single
+# run — that just burns your Telegram/attention budget for a known, ongoing
+# problem. Re-send the failure alert at most this often, unless the error
+# message itself changes (a new/different error always alerts immediately).
+ERROR_RE_ALERT_INTERVAL_SECONDS = 3600  # 1 hour
+
+# How many times to retry a target after a transient failure (proxy hiccup,
+# timeout, etc.) before giving up and sending a failure alert.
+RETRY_ATTEMPTS = 2
+RETRY_BASE_DELAY_SECONDS = 8  # exponential backoff: 8s, 16s, ...
+
+# Block heavy, non-essential resource types (images, fonts, media) before
+# they're even requested. BMS's showtimes page pulls several MB of poster
+# art and font files per load; none of it is needed to read date tabs,
+# theatre names, or showtimes out of the DOM. This is the single biggest
+# lever for cutting proxy bandwidth (= cost) per check, since almost every
+# pay-as-you-go proxy bills by the GB.
+BLOCK_RESOURCE_TYPES = {"image", "media", "font"}
+
+# Third-party domains that BookMyShow's page loads but that have nothing to
+# do with the actual scraping target (ads, analytics, deep-link resolvers,
+# reCAPTCHA, web fonts). Confirmed via ScraperAPI's per-domain analytics:
+# on a single day, doubleclick.net + google.com + googletagmanager.com +
+# branch.io + app.link accounted for close to half of all billed credits,
+# while contributing zero useful data. google.com in particular showed a
+# ~15-17% success rate, consistent with reCAPTCHA challenges retrying and
+# burning credits with no payoff. Matched by hostname (exact or subdomain),
+# never by substring, so e.g. "notgoogletagmanager.com" is never caught.
+BLOCK_DOMAINS = {
+    "doubleclick.net",
+    "googletagmanager.com",
+    "google-analytics.com",
+    "googlesyndication.com",
+    "google.com",  # BMS's reCAPTCHA/ads calls live here; low success rate anyway
+    "branch.io",
+    "app.link",
+    "fonts.googleapis.com",
+    "fonts.gstatic.com",
+}
 
 # IST timezone offset
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -206,31 +248,102 @@ def check_bms(movie_url: str, theatre_name: str, target_date: str) -> dict:
     print(f"🎯 Looking for theatre: '{theatre_name}' on date: {target_date}")
     
     with sync_playwright() as p:
-        # Check if ScraperAPI is configured for residential proxying
-        scraper_api_key = os.environ.get("SCRAPER_API_KEY")
+        # ── API/proxy provider ──
+        # PRIMARY: ScraperAPI, via its "proxy port" method. Username is
+        # literally "scraperapi" with extra params appended after periods
+        # (e.g. "scraperapi.country_code=in"); password is your API key.
+        # Docs: https://docs.scraperapi.com/making-requests/proxy-port-method
+        #
+        # ⚠️ HEADS-UP ON COST: ScraperAPI's standard country_code geotargeting
+        # is only available for US/EU on Hobby and Startup plans — India
+        # geotargeting (country_code=in) requires a Business/Enterprise plan.
+        # On a lower tier, requesting country_code=in can silently fall back
+        # to Premium/residential proxy billing *per request*, which is almost
+        # certainly why credits vanished so fast last time (per-domain
+        # analytics showed bookmyshow.com averaging ~8 credits/request, not
+        # the 1-credit base rate). Check your plan tier before relying on
+        # country_code=in — if you're not on Business+, either upgrade or
+        # drop the country_code param and accept non-Indian exit IPs (BMS
+        # may serve different/less content, so test this first).
+        #
+        # BLOCK_DOMAINS below (ad/analytics/recaptcha/font domains) also
+        # matters a lot here — those alone made up close to half of billed
+        # credits in testing, regardless of provider.
+        proxy_server = "http://proxy-server.scraperapi.com:8001"
+        proxy_username = "scraperapi.country_code=in"
+        proxy_password = os.environ.get("SCRAPER_API_KEY")
+
+        if not proxy_password:
+            # No ScraperAPI key — fall back to a generic BYO proxy provider.
+            # Works with ANY provider that exposes a standard HTTP proxy
+            # gateway (DataImpulse, IPRoyal, Webshare, Smartproxy, Bright
+            # Data, etc). Point these three env vars at your provider's
+            # dashboard values:
+            #   PROXY_SERVER   e.g. "http://gw.dataimpulse.com:823"
+            #   PROXY_USERNAME e.g. "user__cr.in" (India geo-target flag —
+            #                                       syntax varies by provider)
+            #   PROXY_PASSWORD e.g. "abc123"
+            proxy_server = os.environ.get("PROXY_SERVER")
+            proxy_username = os.environ.get("PROXY_USERNAME")
+            proxy_password = os.environ.get("PROXY_PASSWORD")
+
+        using_proxy = bool(proxy_server and proxy_username and proxy_password)
         launch_kwargs = {"headless": True}
-        
-        if scraper_api_key:
-            print("🛡️  Routing request through ScraperAPI (India Proxy)...")
+
+        if using_proxy:
+            print(f"🛡️  Routing request through proxy: {proxy_server}")
             launch_kwargs["proxy"] = {
-                "server": "http://proxy-server.scraperapi.com:8001",
-                "username": "scraperapi.country_code=in",
-                "password": scraper_api_key
+                "server": proxy_server,
+                "username": proxy_username,
+                "password": proxy_password,
             }
-            
+        elif proxy_server or proxy_username or proxy_password:
+            print("⚠️  Proxy env vars are partially set (need PROXY_SERVER, "
+                  "PROXY_USERNAME, and PROXY_PASSWORD all three) — running without a proxy.")
+        else:
+            print("⚠️  No SCRAPER_API_KEY or PROXY_* env vars set — running without a proxy. "
+                  "BMS will very likely block direct requests.")
+
         browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(
             user_agent=USER_AGENT,
             viewport={"width": 1280, "height": 900},
             locale="en-IN",
             timezone_id="Asia/Kolkata",
-            ignore_https_errors=bool(scraper_api_key)
+            ignore_https_errors=using_proxy
         )
+
+        # Cut bandwidth/credits by not downloading images/fonts/media, and by
+        # not even connecting to ad/analytics/recaptcha/font domains that
+        # have nothing to do with the DOM we actually read. Both are cheap
+        # to keep even without a proxy.
+        block_stats = {"blocked_resource_type": 0, "blocked_domain": 0, "allowed": 0}
+
+        def _is_blocked_domain(hostname: str) -> bool:
+            hostname = (hostname or "").lower()
+            return any(hostname == d or hostname.endswith("." + d) for d in BLOCK_DOMAINS)
+
+        def _block_heavy_resources(route):
+            request = route.request
+            if request.resource_type in BLOCK_RESOURCE_TYPES:
+                block_stats["blocked_resource_type"] += 1
+                route.abort()
+                return
+            hostname = urlsplit(request.url).hostname
+            if _is_blocked_domain(hostname):
+                block_stats["blocked_domain"] += 1
+                route.abort()
+                return
+            block_stats["allowed"] += 1
+            route.continue_()
+
+        context.route("**/*", _block_heavy_resources)
+
         page = context.new_page()
         
         try:
             # Navigate to the target date URL (increase timeout if using proxy)
-            goto_timeout = 90000 if scraper_api_key else 30000
+            goto_timeout = 90000 if using_proxy else 30000
             try:
                 page.goto(target_url, wait_until="domcontentloaded", timeout=goto_timeout)
             except Exception as target_navigation_error:
@@ -291,6 +404,15 @@ def check_bms(movie_url: str, theatre_name: str, target_date: str) -> dict:
             traceback.print_exc()
             raise
         finally:
+            total_seen = sum(block_stats.values())
+            if total_seen:
+                print(
+                    f"📊 Requests: {block_stats['allowed']} allowed, "
+                    f"{block_stats['blocked_domain']} blocked (ad/analytics/tracker domains), "
+                    f"{block_stats['blocked_resource_type']} blocked (image/font/media) "
+                    f"— {total_seen - block_stats['allowed']}/{total_seen} "
+                    f"({(total_seen - block_stats['allowed']) / total_seen:.0%}) never hit the proxy."
+                )
             browser.close()
     
     return result
@@ -579,6 +701,27 @@ def _find_theatre(page, theatre_name: str) -> tuple:
     return found, details, showtimes
 
 
+def _check_bms_with_retries(movie_url: str, theatre_name: str, target_date: str) -> dict:
+    """
+    Wrap check_bms() with a small retry/backoff loop. Residential proxy IPs
+    are shared and rotate, so an isolated timeout or connection drop is
+    common and NOT a sign that BMS changed its page structure — retrying
+    with a fresh proxy connection usually just works. Only give up (and let
+    the caller send a failure alert) after RETRY_ATTEMPTS extra tries.
+    """
+    last_error = None
+    for attempt in range(RETRY_ATTEMPTS + 1):
+        try:
+            return check_bms(movie_url, theatre_name, target_date)
+        except Exception as e:
+            last_error = e
+            if attempt < RETRY_ATTEMPTS:
+                delay = RETRY_BASE_DELAY_SECONDS * (2 ** attempt) + random.uniform(0, 3)
+                print(f"   ⚠️  Attempt {attempt + 1} failed ({e}); retrying in {delay:.0f}s...")
+                time.sleep(delay)
+    raise last_error
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -612,10 +755,29 @@ Examples:
     # Handle --mark-done
     if args.mark_done:
         state = load_state()
-        for key in state:
-            state[key]["done"] = True
-        save_state(state)
-        print("✅ Marked as done. No more re-alerts will be sent.")
+        # If a theatre/date (optionally + movie-url) was given, only mark the
+        # matching target(s) as done. This matters once you're tracking more
+        # than one target — otherwise booking one movie would silently
+        # silence alerts for all your other targets too.
+        if args.theatre or args.date:
+            prefix = f"{args.theatre.lower()}_{args.date}"
+            if args.movie_url:
+                prefix += f"_{hashlib.sha1(args.movie_url.encode('utf-8')).hexdigest()[:8]}"
+            matched = [k for k in state if k.startswith(prefix)]
+            if not matched:
+                print(f"⚠️  No tracked target matched theatre='{args.theatre}' date='{args.date}'. "
+                      f"Nothing was changed. Run without --theatre/--date to mark ALL targets done.")
+                return
+            for key in matched:
+                state[key]["done"] = True
+            save_state(state)
+            print(f"✅ Marked {len(matched)} target(s) as done. No more re-alerts for them.")
+        else:
+            for key in state:
+                state[key]["done"] = True
+            save_state(state)
+            print("✅ Marked ALL tracked targets as done. No more re-alerts will be sent.")
+            print("   Tip: pass --theatre/--date to mark just one target done instead.")
         print("   Run with --reset to start checking again.")
         return
     
@@ -696,24 +858,52 @@ Examples:
             print(f"⚠️  Skipping target {i+1}: missing 'movie_url' or 'url' value")
             continue
         
-        state_key = f"{theatre_name.lower()}_{target_date}"
+        # Include a short hash of the movie URL so two different movies that
+        # happen to share the same theatre + date don't overwrite each
+        # other's state (this used to be a real bug with multi-target setups).
+        url_fingerprint = hashlib.sha1(movie_url.encode("utf-8")).hexdigest()[:8]
+        state_key = f"{theatre_name.lower()}_{target_date}_{url_fingerprint}"
         print(f"\n▶️  Target {i+1}/{len(targets)}: {theatre_name} on {target_date}")
         
         try:
-            result = check_bms(movie_url, theatre_name, target_date)
+            result = _check_bms_with_retries(movie_url, theatre_name, target_date)
         except Exception as e:
             # Page check failed — send error alert so user doesn't miss a silent failure
-            error_msg = (
-                f"⚠️ <b>BMS Checker Script FAILED</b> ⚠️\n\n"
-                f"Error: <code>{str(e)[:200]}</code>\n\n"
-                f"🎬 Movie URL: {movie_url}\n"
-                f"🏢 Theatre: {theatre_name}\n"
-                f"📅 Date: {target_date}\n\n"
-                f"⏰ Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}\n\n"
-                f"👉 <b>Check manually — the script might be broken or BMS changed their page structure.</b>"
+            error_text = str(e)[:200]
+            previous = state.get(state_key, {})
+            last_error_text = previous.get("last_error_text")
+            last_error_ts = previous.get("last_error_timestamp", 0)
+            elapsed = time.time() - last_error_ts
+            # Only re-send the SAME error if enough time has passed. A
+            # different error always alerts right away.
+            should_error_alert = (
+                error_text != last_error_text
+                or elapsed >= ERROR_RE_ALERT_INTERVAL_SECONDS
             )
-            send_telegram(tg_token, tg_chat_id, error_msg)
-            print(f"❌ Script failed for this target. Error alert sent via Telegram.")
+
+            if should_error_alert:
+                error_msg = (
+                    f"⚠️ <b>BMS Checker Script FAILED</b> ⚠️\n\n"
+                    f"Error: <code>{html.escape(error_text)}</code>\n\n"
+                    f"🎬 Movie URL: {html.escape(movie_url)}\n"
+                    f"🏢 Theatre: {html.escape(theatre_name)}\n"
+                    f"📅 Date: {html.escape(target_date)}\n\n"
+                    f"⏰ Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}\n\n"
+                    f"👉 <b>Check manually — the script might be broken or BMS changed their page structure.</b>"
+                )
+                send_telegram(tg_token, tg_chat_id, error_msg)
+                print(f"❌ Script failed for this target. Error alert sent via Telegram.")
+            else:
+                print(
+                    f"❌ Script failed for this target (same error as last alert, "
+                    f"{elapsed/60:.0f} min ago). Suppressing duplicate alert."
+                )
+
+            state[state_key] = {
+                **previous,
+                "last_error_text": error_text,
+                "last_error_timestamp": time.time() if should_error_alert else last_error_ts,
+            }
             save_state(state)  # Save state so far to avoid losing progress
             continue
         
@@ -735,11 +925,11 @@ Examples:
             
             message = (
                 f"🎟️🎟️🎟️ <b>TICKETS ARE OPEN!</b> 🎟️🎟️🎟️\n\n"
-                f"🎬 <b>{result['movie_name']}</b>\n"
-                f"🏢 <b>{theatre_name}</b>\n"
-                f"📅 <b>{target_date}</b>\n"
-                f"🕐 Showtimes: {showtime_str}\n\n"
-                f"🔗 <a href=\"{result['target_url']}\">BOOK NOW on BookMyShow</a>\n\n"
+                f"🎬 <b>{html.escape(result['movie_name'] or 'Movie')}</b>\n"
+                f"🏢 <b>{html.escape(theatre_name)}</b>\n"
+                f"📅 <b>{html.escape(target_date)}</b>\n"
+                f"🕐 Showtimes: {html.escape(showtime_str)}\n\n"
+                f"🔗 <a href=\"{html.escape(result['target_url'], quote=True)}\">BOOK NOW on BookMyShow</a>\n\n"
                 f"⚡ <b>GO GO GO — Book before it sells out!</b>\n\n"
                 f"<i>Run <code>python bms_checker.py --mark-done</code> after booking to stop reminders.</i>"
             )

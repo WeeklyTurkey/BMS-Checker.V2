@@ -44,6 +44,9 @@ jobs:
           BMS_MOVIE_URL: ${{ vars.BMS_MOVIE_URL }}
           BMS_THEATRE_NAME: ${{ vars.BMS_THEATRE_NAME }}
           BMS_TARGET_DATE: ${{ vars.BMS_TARGET_DATE }}
+          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+          PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
+          PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: |
           if [ -f "targets.json" ]; then
